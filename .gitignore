@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.back up/
+back up/
+etejah-bot/
+restarts_bale.txt
