@@ -6,3 +6,5 @@ back up/
 etejah-bot/
 restarts_bale.txt
 bridge.log
+pending_uploads.jsonl
+bridge_cache/
