@@ -6,7 +6,7 @@
     "MY_CHANNEL_TEXT": "🇮🇷 ایران بالعربي",
     "MY_CHANNEL_LINK": "https://ble.ir/iranbelarabi",
     "LOCAL_API": {
-        "enabled": false,
+        "enabled": true,
         "api_id": "39252475",
         "api_hash": "f16c1f54d5eab45024097dc65193c1d7",
         "executable_path": "/home/etejah-bot/bot2/telegram-bot-api",
