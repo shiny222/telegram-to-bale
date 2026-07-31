@@ -196,7 +196,8 @@ async def tg_log_reply(app: Application, tg_chat_id: int, tg_message_id: int, te
 def _media_size(msg: Message) -> Optional[int]:
     for attr in ("photo", "video", "document", "audio", "voice", "animation", "sticker", "video_note"):
         m = getattr(msg, attr, None)
-        if m is None:
+        # PTB returns an EMPTY TUPLE () (not None) for absent photo/video/etc.
+        if not m:
             continue
         if attr == "photo":
             return getattr(m[-1], "file_size", None)
