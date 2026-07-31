@@ -35,6 +35,7 @@ MY_CHANNEL_LINK = CONFIG.get("MY_CHANNEL_LINK", "")
 ALBUM_DEBOUNCE = 2.0  # Increased slightly to ensure all album parts are caught before sending
 MAX_ATTEMPTS = 6
 WORKERS = 1
+TG_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20MB — Telegram Bot API download limit
 
 LOG_TAG_BALE = "#BRIDGE_LOG_BALE"
 LOG_TAG_RUBIKA = "#BRIDGE_LOG_RUBIKA"
@@ -42,7 +43,11 @@ LOG_PREFIX = f"🔔 [Bale Bridge] مربوط به برنامه «بله»\n{LOG_
 
 BALE_BASE = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | bridge | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | bridge | %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("bridge.log", encoding="utf-8")],
+)
 logger = logging.getLogger("bridge")
 
 # =========================
@@ -94,7 +99,7 @@ class BaleClient:
         url = f"{BALE_BASE}/{method}"
         try:
             if files:
-                r = await self._client.post(url, data=data or {}, files=files)
+                r = await self._client.post(url, data=data or {}, files=files, timeout=httpx.Timeout(240.0, connect=15.0))
             else:
                 r = await self._client.post(url, json=data or {})
         except Exception as e:
@@ -156,12 +161,21 @@ class BaleClient:
 # =========================
 # UTILS & TEXT CLEANING 
 # =========================
+MD_ESCAPE_RE = re.compile(r'([_*\[\]`\\])')
+
+
+def esc_md(text: str) -> str:
+    """Escape characters that are special in Bale/Telegram legacy Markdown."""
+    return MD_ESCAPE_RE.sub(r'\\\1', text)
+
+
 def clean_text(text: Optional[str]) -> Optional[str]:
     link_md = f'\n\n[{MY_CHANNEL_TEXT}]({MY_CHANNEL_LINK})'
     if not text:
         return link_md.strip()
         
     cleaned = re.sub(r'https?://\S+|#\S+|@\S+', '', text).strip()
+    cleaned = esc_md(cleaned)
     return f"{cleaned}{link_md}"
 
 async def tg_download_file_bytes(app: Application, file_id: str) -> Tuple[bytes, str]:
@@ -179,7 +193,25 @@ async def tg_log_reply(app: Application, tg_chat_id: int, tg_message_id: int, te
 # =========================
 # TELEGRAM -> BALE SENDING
 # =========================
+def _media_size(msg: Message) -> Optional[int]:
+    for attr in ("photo", "video", "document", "audio", "voice", "animation", "sticker", "video_note"):
+        m = getattr(msg, attr, None)
+        if m is None:
+            continue
+        if attr == "photo":
+            return getattr(m[-1], "file_size", None)
+        return getattr(m, "file_size", None)
+    return None
+
+
 async def send_single_to_bale(app: Application, bale: BaleClient, msg: Message, override_caption: Optional[str] = None, is_album_part: bool = False) -> None:
+    size = _media_size(msg)
+    if size and size > TG_MAX_DOWNLOAD_BYTES:
+        await tg_log_reply(app, msg.chat_id, msg.message_id,
+                           f"⚠️ فایل بزرگتر از حد مجاز ۲۰ مگابایت است و ارسال نشد.\nحجم: {size // (1024 * 1024)}MB")
+        logger.warning("Skipped oversized file (size=%s) from %s:%s", size, msg.chat_id, msg.message_id)
+        return
+
     if is_album_part:
         cap = override_caption
     else:
@@ -253,35 +285,56 @@ async def send_album_to_bale(app: Application, bale: BaleClient, messages: List[
             break
 
     media_json = []
+    media_msgs = []
     files_dict = {}
     fallback_messages = []
 
     for i, m in enumerate(messages):
-        is_last = (i == len(messages) - 1)
-        cap_to_send = album_caption if is_last else None
         attach_name = f"file_{i}"
+
+        size = _media_size(m)
+        if size and size > TG_MAX_DOWNLOAD_BYTES:
+            await tg_log_reply(app, m.chat_id, m.message_id,
+                               f"⚠️ فایل بزرگتر از حد مجاز ۲۰ مگابایت است و از آلبوم حذف شد.\nحجم: {size // (1024 * 1024)}MB")
+            logger.warning("Skipped oversized album item (size=%s)", size)
+            continue
 
         # Bale MediaGroups typically only support Photos and Videos
         if m.photo:
             data, filename = await tg_download_file_bytes(app, m.photo[-1].file_id)
             if not filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")): filename += ".jpg"
-            media_json.append({"type": "photo", "media": f"attach://{attach_name}", "caption": cap_to_send, "parse_mode": "Markdown"})
+            media_json.append({"type": "photo", "media": f"attach://{attach_name}", "caption": None, "parse_mode": "Markdown"})
             files_dict[attach_name] = (filename, data)
+            media_msgs.append(m)
             
         elif m.video:
             data, filename = await tg_download_file_bytes(app, m.video.file_id)
             if not filename.lower().endswith((".mp4", ".mkv", ".mov", ".webm")): filename += ".mp4"
-            media_json.append({"type": "video", "media": f"attach://{attach_name}", "caption": cap_to_send, "parse_mode": "Markdown"})
+            media_json.append({"type": "video", "media": f"attach://{attach_name}", "caption": None, "parse_mode": "Markdown"})
             files_dict[attach_name] = (filename, data)
+            media_msgs.append(m)
             
         else:
             # If the album contains a file/document, we handle it separately just in case
-            fallback_messages.append((m, cap_to_send))
+            fallback_messages.append((m, None))
+
+    # Attach the album caption to the LAST item that is actually sent
+    if media_json:
+        media_json[-1]["caption"] = album_caption
+    elif fallback_messages:
+        last_m, _ = fallback_messages[-1]
+        fallback_messages[-1] = (last_m, album_caption)
 
     # Send the native album!
     if media_json:
-        logger.info(f"TESTING ALBUM FEATURE: Sending {len(media_json)} items to Bale...")
-        await bale.send_media_group(BALE_CHAT_ID, media_json, files_dict)
+        if len(media_json) == 1:
+            # Single-item albums are safer sent as a regular message
+            single_msg = media_msgs[0]
+            await send_single_to_bale(app, bale, single_msg, override_caption=album_caption, is_album_part=True)
+            await asyncio.sleep(2.0)
+        else:
+            logger.info(f"Sending {len(media_json)} items as a media group to Bale...")
+            await bale.send_media_group(BALE_CHAT_ID, media_json, files_dict)
 
     # Send anything else that couldn't be grouped
     for m, cap in fallback_messages:
@@ -414,7 +467,7 @@ def main():
     threading.Thread(target=watchdog_thread, daemon=True).start()
 
     app = Application.builder().token(TG_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-    app.add_handler(MessageHandler(filters.ALL, on_any_message))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, on_any_message))
 
     logger.info("Running Telegram polling... (Press Ctrl+C to stop)")
     app.run_polling(drop_pending_updates=False)
