@@ -703,10 +703,14 @@ class Bridge:
             job = await self.queue.get()
             # Write-ahead: persist fresh jobs before attempting the send so a
             # mid-flight kill (e.g. a systemd 20-min restart) cannot lose the job.
+            # Guarded so a persist failure can never kill the worker task.
             if job.kind != "pending":
-                _wa_rec = _make_pending_record(job)
-                if _wa_rec:
-                    _add_pending(_wa_rec)
+                try:
+                    _wa_rec = _make_pending_record(job)
+                    if _wa_rec:
+                        _add_pending(_wa_rec)
+                except Exception:
+                    logger.exception("write-ahead persist failed; continuing")
             success = False
             last_err = None
 
