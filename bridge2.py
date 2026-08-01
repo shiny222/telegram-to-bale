@@ -306,12 +306,22 @@ async def _download_to_cache(app: Application, file_id: str, file_unique_id: str
 def _load_pending() -> Dict[str, dict]:
     if not os.path.exists(PENDING_FILE):
         return {}
+    records: Dict[str, dict] = {}
     try:
         with open(PENDING_FILE, "r", encoding="utf-8") as f:
-            return {json.loads(l)["key"]: json.loads(l) for l in f if l.strip()}
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    records[rec["key"]] = rec
+                except Exception:
+                    logger.warning("skipping corrupt pending line: %s", line[:100])
     except Exception as e:
         logger.warning("pending load failed: %s", e)
         return {}
+    return records
 
 def _save_pending(records: Dict[str, dict]):
     try:
@@ -468,7 +478,8 @@ async def send_single_to_bale(app: Application, bale: BaleClient, msg: Message, 
     info = _media_info(msg)
     if info is None:
         # text-only (or unsupported type) -> send as a text message
-        await bale.send_message(BALE_CHAT_ID, cap)
+        if cap:
+            await bale.send_message(BALE_CHAT_ID, cap)
         return
 
     kind, file_id, file_unique_id, suffix, filename = info
@@ -597,15 +608,20 @@ async def _send_pending_record(app: Application, bale: BaleClient, rec: dict):
                           rec["suffix"], rec["filename"], rec.get("caption"),
                           rec.get("tg_chat_id"), rec.get("tg_message_id"))
     else:
-        # album: rebuild media group from stored items
+        # album: rebuild media group from stored items (photos/videos only) and
+        # send any other item kinds individually with their real media type.
         media_json = []
         media_meta = []
         files_dict = {}
         handles = []
+        singles = []
         try:
             for i, it in enumerate(rec.get("items", [])):
                 attach_name = f"file_{i}"
                 path = await _download_to_cache(app, it["file_id"], it["file_unique_id"], it["suffix"])
+                if it["kind"] not in ("photo", "video"):
+                    singles.append(it)
+                    continue
                 fh = open(path, "rb")
                 handles.append(fh)
                 mtype = "photo" if it["kind"] == "photo" else "video"
@@ -623,6 +639,11 @@ async def _send_pending_record(app: Application, bale: BaleClient, rec: dict):
             elif media_json:
                 max_size = max(mm[5] for mm in media_meta)
                 await bale.send_media_group(BALE_CHAT_ID, media_json, files_dict, timeout=_upload_timeout(max_size))
+
+            for it in singles:
+                await _send_media(app, bale, it["kind"], it["file_id"], it["file_unique_id"],
+                                  it["suffix"], it["filename"], rec.get("caption"),
+                                  rec.get("tg_chat_id"), rec.get("tg_message_id"))
         finally:
             for fh in handles:
                 try:
@@ -680,6 +701,12 @@ class Bridge:
     async def worker_loop(self, idx: int):
         while True:
             job = await self.queue.get()
+            # Write-ahead: persist fresh jobs before attempting the send so a
+            # mid-flight kill (e.g. a systemd 20-min restart) cannot lose the job.
+            if job.kind != "pending":
+                _wa_rec = _make_pending_record(job)
+                if _wa_rec:
+                    _add_pending(_wa_rec)
             success = False
             last_err = None
 
