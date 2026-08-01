@@ -122,6 +122,9 @@ class SendJob:
 # =========================
 # BALE CLIENT
 # =========================
+class BaleFileTooBigError(RuntimeError):
+    """Bale rejected the file because it exceeds Bale's upload size limit."""
+
 class BaleClient:
     def __init__(self):
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=15.0))
@@ -147,6 +150,11 @@ class BaleClient:
             raise RuntimeError(f"Bale non-JSON response (status={r.status_code}): {(r.text or '')[:800]}")
 
         if r.status_code != 200 or not j.get("ok", False):
+            desc = str(j.get("description", ""))
+            if re.search(r"file[\s_]+is[\s_]+too[\s_]+big|file_size_exceeded|too[\s_]+large|"
+    r"exceeds.{0,20}limit|413|too[\s_]+big|limit.{0,20}exceed|entity[\s_]+too[\s_]+large|"
+    r"file[\s_]+too[\s_]+large", desc, re.IGNORECASE):
+                raise BaleFileTooBigError(f"Bale API error (status={r.status_code}): {desc}")
             raise RuntimeError(f"Bale API error (status={r.status_code}): {json.dumps(j, ensure_ascii=False)[:1200]}")
         return j
 
@@ -685,6 +693,17 @@ class Bridge:
                         await send_album_to_bale(self.app, self.bale, job.album_messages)
                     success = True
                     break
+                except BaleFileTooBigError as e:
+                    # Bale rejected the file (e.g. too big): retrying can never
+                    # succeed, so drop it immediately instead of looping forever.
+                    last_err = e
+                    await tg_log_reply(
+                        self.app, job.tg_chat_id, job.tg_message_id,
+                        f"❌ بله این فایل را به دلیل حجم زیاد نپذیرفت و ارسال نشد.\n"
+                        f"نوع: {job.kind}\nجزئیات: {type(e).__name__}: {str(e)[:200]}"
+                    )
+                    logger.warning("DROP job (file too big for Bale) | kind=%s | %s", job.kind, str(e)[:200])
+                    break
                 except Exception as e:
                     last_err = e
                     delay = min(20.0, 2.0 ** attempt)
@@ -702,16 +721,23 @@ class Bridge:
             if success:
                 _remove_pending(job.short_id())
             else:
-                rec = _make_pending_record(job)
-                if rec:
-                    _add_pending(rec)
-                await tg_log_reply(
-                    self.app, job.tg_chat_id, job.tg_message_id,
-                    f"❌ ارسال انجام نشد و بعد از {MAX_ATTEMPTS} تلاش رها شد."
-                    f"{' در صف تلاش مجدد ذخیره شد.' if rec else ''}\n"
-                    f"نوع: {job.kind}\nجزئیات: {str(last_err)[:300]}"
-                )
-                logger.error("DROP job after max attempts | kind=%s", job.kind)
+                # Permanently drop the job. A pending record that can never be sent
+                # (e.g. file too big for Bale) must not survive, otherwise the restart
+                # loop in run_bridge2.sh would retry it forever.
+                _remove_pending(job.short_id())
+                rec = None
+                if not isinstance(last_err, BaleFileTooBigError) and job.kind != "pending":
+                    rec = _make_pending_record(job)
+                    if rec:
+                        _add_pending(rec)
+                if not isinstance(last_err, BaleFileTooBigError):
+                    await tg_log_reply(
+                        self.app, job.tg_chat_id, job.tg_message_id,
+                        f"❌ ارسال انجام نشد و بعد از {MAX_ATTEMPTS} تلاش رها شد."
+                        f"{' در صف تلاش مجدد ذخیره شد.' if rec else ''}\n"
+                        f"نوع: {job.kind}\nجزئیات: {str(last_err)[:300]}"
+                    )
+                logger.error("DROP job after max attempts | kind=%s | %s", job.kind, str(last_err)[:200])
 
             self.queue.task_done()
 
