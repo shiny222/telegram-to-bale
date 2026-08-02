@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: telegram-to-bale
+  IMAGE_NAME: etejah
 
 jobs:
   build-and-push:
@@ -36,8 +36,6 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: |
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: shiny222/etejah:bale-latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
