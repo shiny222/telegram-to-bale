@@ -29,6 +29,98 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 with open("config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
+# =========================
+# Environment Variable Overrides
+# =========================
+def _get_env(key, default=None, cast=None):
+    value = os.environ.get(key)
+    if value is None or value == "":
+        return default
+    if cast == bool:
+        return value.lower() in ("1", "true", "yes", "on")
+    if cast == int:
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return value
+
+_PREFIX = "BALE_"
+
+_SCALAR_OVERRIDES = {
+    "TG_BOT_TOKEN": f"{_PREFIX}TG_BOT_TOKEN",
+    "BALE_BOT_TOKEN": f"{_PREFIX}BALE_BOT_TOKEN",
+    "BALE_CHAT_ID": f"{_PREFIX}BALE_CHAT_ID",
+    "TG_SOURCE_CHAT_ID": f"{_PREFIX}TG_SOURCE_CHAT_ID",
+    "MY_CHANNEL_TEXT": f"{_PREFIX}MY_CHANNEL_TEXT",
+    "MY_CHANNEL_LINK": f"{_PREFIX}MY_CHANNEL_LINK",
+}
+for _json_key, _env_key in _SCALAR_OVERRIDES.items():
+    _val = _get_env(_env_key)
+    if _val is not None:
+        CONFIG[_json_key] = _val
+
+_LOCAL_API = CONFIG.setdefault("LOCAL_API", {})
+_LOCAL_OVERRIDES = {
+    "enabled": f"{_PREFIX}LOCAL_API_ENABLED",
+    "api_id": f"{_PREFIX}LOCAL_API_API_ID",
+    "api_hash": f"{_PREFIX}LOCAL_API_API_HASH",
+    "executable_path": f"{_PREFIX}LOCAL_API_EXECUTABLE_PATH",
+    "host": f"{_PREFIX}LOCAL_API_HOST",
+    "port": f"{_PREFIX}LOCAL_API_PORT",
+    "start_server": f"{_PREFIX}LOCAL_API_START_SERVER",
+    "max_download_mb": f"{_PREFIX}LOCAL_API_MAX_DOWNLOAD_MB",
+}
+for _json_key, _env_key in _LOCAL_OVERRIDES.items():
+    _val = _get_env(_env_key)
+    if _val is not None:
+        _LOCAL_API[_json_key] = _val
+
+# Fallback to common Telegram API env vars for shared settings
+_LOCAL_API["api_id"] = _get_env("TELEGRAM_API_ID", _LOCAL_API.get("api_id"))
+_LOCAL_API["api_hash"] = _get_env("TELEGRAM_API_HASH", _LOCAL_API.get("api_hash"))
+_LOCAL_API["host"] = _get_env("TELEGRAM_LOCAL_API_HOST", _LOCAL_API.get("host"))
+_LOCAL_API["port"] = _get_env("TELEGRAM_LOCAL_API_PORT", _LOCAL_API.get("port"))
+
+_CACHE = CONFIG.setdefault("SHARED_CACHE", {})
+_CACHE_OVERRIDES = {
+    "dir": f"{_PREFIX}SHARED_CACHE_DIR",
+    "keep_hours": f"{_PREFIX}SHARED_CACHE_KEEP_HOURS",
+    "max_gb": f"{_PREFIX}SHARED_CACHE_MAX_GB",
+}
+for _json_key, _env_key in _CACHE_OVERRIDES.items():
+    _val = _get_env(_env_key)
+    if _val is not None:
+        _CACHE[_json_key] = _val
+
+_UPLOAD = CONFIG.setdefault("UPLOAD", {})
+_UPLOAD_OVERRIDES = {
+    "max_attempts": f"{_PREFIX}UPLOAD_MAX_ATTEMPTS",
+    "retry_delay_sec": f"{_PREFIX}UPLOAD_RETRY_DELAY_SEC",
+    "base_timeout_sec": f"{_PREFIX}UPLOAD_BASE_TIMEOUT_SEC",
+    "timeout_per_mb": f"{_PREFIX}UPLOAD_TIMEOUT_PER_MB",
+    "pending_queue": f"{_PREFIX}UPLOAD_PENDING_QUEUE",
+}
+for _json_key, _env_key in _UPLOAD_OVERRIDES.items():
+    _val = _get_env(_env_key)
+    if _val is not None:
+        _UPLOAD[_json_key] = _val
+
+# =========================
+# Validate Required Values
+# =========================
+_REQUIRED_VARS = {
+    "TG_BOT_TOKEN": "Bale Telegram bot token",
+    "BALE_BOT_TOKEN": "Bale API token",
+    "BALE_CHAT_ID": "Bale chat ID",
+}
+for _key, _name in _REQUIRED_VARS.items():
+    if not CONFIG.get(_key):
+        raise SystemExit(
+            f"Missing required configuration: {_name}. "
+            f"Set it in config.json or via the {_key} environment variable."
+        )
+
 TG_BOT_TOKEN = CONFIG["TG_BOT_TOKEN"]
 BALE_BOT_TOKEN = CONFIG["BALE_BOT_TOKEN"]
 BALE_CHAT_ID = CONFIG["BALE_CHAT_ID"]
