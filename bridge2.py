@@ -26,8 +26,12 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 # =========================
 # 1. JSON CONFIG
 # =========================
-with open("config.json", "r", encoding="utf-8") as f:
-    CONFIG = json.load(f)
+try:
+    with open("config.json", "r", encoding="utf-8") as f:
+        CONFIG = json.load(f)
+except FileNotFoundError:
+    # Docker supplies the complete configuration through environment variables.
+    CONFIG = {}
 
 # =========================
 # Environment Variable Overrides
@@ -132,10 +136,10 @@ ALBUM_DEBOUNCE = 2.0  # ensure all album parts are caught before sending
 
 # ---- Optional Local Bot API server ----
 LOCAL_API = CONFIG.get("LOCAL_API", {})
-LOCAL_API_ENABLED = bool(LOCAL_API.get("enabled", False))
+LOCAL_API_ENABLED = str(LOCAL_API.get("enabled", False)).lower() in ("1", "true", "yes", "on")
 LOCAL_API_HOST = LOCAL_API.get("host", "127.0.0.1")
 LOCAL_API_PORT = int(LOCAL_API.get("port", 8081))
-LOCAL_API_START_SERVER = bool(LOCAL_API.get("start_server", False))
+LOCAL_API_START_SERVER = str(LOCAL_API.get("start_server", False)).lower() in ("1", "true", "yes", "on")
 LOCAL_API_EXECUTABLE = LOCAL_API.get("executable_path", "")
 LOCAL_API_ID = LOCAL_API.get("api_id", "")
 LOCAL_API_HASH = LOCAL_API.get("api_hash", "")
